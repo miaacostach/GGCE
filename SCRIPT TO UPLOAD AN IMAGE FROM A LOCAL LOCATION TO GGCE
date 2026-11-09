@@ -1,0 +1,264 @@
+# SCRIPT TO UPLOAD AN IMAGE FROM A LOCAL LOCATION TO GGCE
+#
+# General workflow:
+# Validate the file → build metadata → prepare the request →
+# upload the image → check the response.
+
+
+# ==================================================
+# 0. INSTALL PACKAGES
+# ==================================================
+
+# Before running this script against another instance,
+# verify the paths and codes.
+# install.packages(c("curl", "jsonlite"))
+
+library(curl)      # Functions for API communication and file uploads.
+library(jsonlite)  # Functions for converting R objects to JSON.
+
+
+# ==================================================
+# 1. CONFIGURATION
+# ==================================================
+
+host <- "https://your-api.com/backend"
+origin <- "https://your-origin.com"
+
+# Authentication token.
+# In this environment, the token expires approximately every three days.
+
+token <- "your-token"
+
+# Local path to the file.
+
+archivo <- paste0(
+  "C:/User/Downloads/",
+  "image_for_ACC2.jpg"
+)
+
+# Confirm that the inventory ID exists in the target GGCE instance.
+
+inventario_id <- 99111L # Select the inventory ID associated with the accession.
+
+titulo <- "ACC2"
+descripcion <- "Seed image"
+visible_web <- FALSE
+
+
+# ==================================================
+# 2. VALIDATION
+# ==================================================
+
+# Remove surrounding whitespace and an existing Bearer prefix.
+# The prefix is added again when configuring the request headers.
+
+token <- trimws(token)
+token <- sub("^Bearer\\s+", "", token, ignore.case = TRUE)
+
+if (!nzchar(token) ||
+    token %in% c("TU_TOKEN_REAL", "xxxx", "TU_TOKEN")) {
+  stop("Introduce tu token real.", call. = FALSE)
+}
+
+# Verify that the path points to an existing file rather than a directory.
+
+if (!file.exists(archivo) || dir.exists(archivo)) {
+  stop("No existe el archivo: ", archivo, call. = FALSE)
+}
+
+# Require a single, non-missing, positive integer inventory ID.
+
+if (length(inventario_id) != 1L ||
+    is.na(inventario_id) ||
+    inventario_id <= 0 ||
+    inventario_id != floor(inventario_id)) {
+  stop("Configura un ID de inventario válido.", call. = FALSE)
+}
+
+# Convert the extension to lowercase to recognize files such as .JPG.
+
+extension <- tolower(tools::file_ext(archivo))
+
+# Map supported extensions to their MIME types.
+
+tipos <- c(
+  jpg = "image/jpeg",
+  jpeg = "image/jpeg",
+  png = "image/png"
+)
+
+if (!extension %in% names(tipos)) {
+  stop("Este ejemplo admite JPG, JPEG y PNG.", call. = FALSE)
+}
+
+tipo <- unname(tipos[extension])
+
+# Build the endpoint using the route confirmed in the Swagger output.
+
+endpoint <- paste0(
+  sub("/+$", "", host),
+  "/api/v2/i/attach/",
+  format(inventario_id, scientific = FALSE, trim = TRUE)
+)
+
+
+# ==================================================
+# METADATA: OMIT fileMetadata
+# ==================================================
+
+# Build the metadata structure and its nested objects.
+
+metadata <- list(
+  attachMetadata = list(
+    title = titulo,
+    description = descripcion,
+    contentType = tipo,
+    isWebVisible = visible_web,
+
+    attachCooperator = list(
+      id = 12345L
+    ),
+
+    attachDate = "2026-10-02T00:00:00.000+00:00",
+    attachDateCode = "MM/dd/yyyy",
+
+    categoryCode = "IMAGE",
+    descriptionCode = "SEED",
+    note = "Image uploaded from R via API"
+  )
+)
+
+# Convert the R list into the JSON payload sent to GGCE.
+# auto_unbox = TRUE serializes single values as JSON scalars.
+# pretty = TRUE formats the JSON for readability.
+
+metadata_json <- as.character(
+  jsonlite::toJSON(
+    metadata,
+    auto_unbox = TRUE,
+    pretty = TRUE
+  )
+)
+
+cat(metadata_json, "\n")
+
+metadata_json <- as.character(
+  jsonlite::toJSON(
+    metadata,
+    auto_unbox = TRUE,
+    pretty = TRUE
+  )
+)
+
+# Rebuild the endpoint using the v2 route.
+
+endpoint <- paste0(
+  sub("/+$", "", host),
+  "/api/v2/i/attach/",
+  format(inventario_id, scientific = FALSE, trim = TRUE)
+)
+
+
+# ==================================================
+# CREATE A NEW REQUEST
+# ==================================================
+
+# Create a new curl handle for the request headers,
+# connection options, and multipart content.
+
+h <- curl::new_handle()
+
+# Set the authentication token, request origin,
+# and expected response format.
+
+curl::handle_setheaders(
+  h,
+  Authorization = paste("Bearer", token),
+  Origin = origin,
+  Accept = "application/json"
+)
+
+# Set the connection timeout and total request timeout, in seconds.
+
+curl::handle_setopt(
+  h,
+  connecttimeout = 30,
+  timeout = 120
+)
+
+# Build the multipart form with file and metadata parts.
+# form_file() uploads the file contents, not just its path.
+# form_data() sends the metadata JSON as text.
+
+curl::handle_setform(
+  h,
+  file = curl::form_file(
+    archivo,
+    type = tipo
+  ),
+  metadata = curl::form_data(
+    metadata_json,
+    type = "application/json"
+  )
+)
+
+# Print the destination and metadata for inspection.
+
+cat("Destino:", endpoint, "\n")
+cat("Metadatos:\n", metadata_json, "\n")
+
+
+# ==================================================
+# UPLOAD THE IMAGE
+# ==================================================
+
+# Execute the request and upload the image.
+# Keep the server response in memory for inspection.
+# If a connection error occurs, include its message in the error output.
+# After a timeout, check GGCE before retrying because the upload
+# may have reached the server.
+
+respuesta <- tryCatch(
+  curl::curl_fetch_memory(endpoint, handle = h),
+  error = function(e) {
+    stop(
+      "Error de conexión: ", conditionMessage(e),
+      "\nSi hubo timeout, verifica en GGCE antes de repetir.",
+      call. = FALSE
+    )
+  }
+)
+
+# Convert the response body from raw bytes to readable text.
+
+cuerpo <- rawToChar(respuesta$content)
+
+# Retrieve the HTTP status code returned by GGCE.
+
+codigo <- respuesta$status_code
+
+# HTTP status codes from 200 to 299 indicate a successful request.
+
+cat("\nHTTP:", codigo, "\n")
+
+# Print the response body when it is not empty.
+
+if (nzchar(cuerpo)) {
+  cat("Respuesta del servidor:\n", cuerpo, "\n")
+}
+
+# Report success or stop execution with the returned HTTP status code.
+
+if (codigo >= 200 && codigo < 300) {
+  message("Solicitud completada. Verifica el adjunto en GGCE.")
+} else {
+  stop(
+    sprintf(
+      "GGCE respondió HTTP %s; revisa la respuesta anterior.",
+      codigo
+    ),
+    call. = FALSE
+  )
+}
+
+# 200 success
